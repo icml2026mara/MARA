@@ -9,7 +9,7 @@ The module is integrated into the **RealAgnosticInteractionBlock** and **RealAgn
 
 An overview of the model architecture is shown in the figure below.
 
-![Model architecture](docs/architectural sketch.png)
+![Model architecture](docs/architectural_sketch.png)
 
 ## Requirements
 
