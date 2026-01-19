@@ -19,6 +19,11 @@ The implementation has been developed and tested with the following setup:
 ```
 pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 ```
+- **torch-scatter 2.8.0+cu128** - scatter operator 
+```
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.8.0+cu128.html
+```
+
 - **torch-harmonics 0.8.0**  – spherical attention implementation  
   https://github.com/NVIDIA/torch-harmonics
 - **MACE / ACE suite** – equivariant message passing framework  
