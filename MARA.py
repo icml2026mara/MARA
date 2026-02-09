@@ -134,7 +134,7 @@ class SEAttention(nn.Module):
         node_feats_T = node_feats[tgt].unsqueeze(-1) + attn_flat
         node_feats_T = self.rms_node(node_feats_T.permute(0, 2, 1)).permute(0, 2, 1)
 
-        x_rec = node_feats_T.mean(dim=1)  # [E,HW]
+        x_rec = node_feats_T.mean(dim=1) 
         x_rec = self.expand_input1(x_rec)  # [E,input_size]
         gate = torch.sigmoid(x_rec)
 
