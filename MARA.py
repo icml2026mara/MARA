@@ -4,6 +4,128 @@ from torch import nn
 from torch_harmonics import AttentionS2
 from torch_scatter import scatter_add
 
+# add e3nn.o3 as o3
+# add custom kernel CUDA
+
+class IAttentionSE3(nn.Module):
+    def __init__(self, input_size, hidden_size=32, H=4, W=8):
+        super().__init__()
+        self.H = H
+        self.W = W
+        self.HW = H * W
+        self.C = hidden_size
+
+        self.dir_enc = nn.Linear(3, self.C)
+        self.dist_enc = nn.Linear(1, self.C)
+        self.norm_sphere = nn.LayerNorm(self.C)
+        self.attn_s2 = AttentionS2(
+            in_channels=self.C,
+            out_channels=self.C,
+            num_heads=1,
+            in_shape=(H, W),
+            out_shape=(H, W),
+            drop_rate=0.0
+        )
+        self.register_buffer("sphere_grid", self.build_sphere_grid(H, W))
+
+        self.features_in = self.C
+        self.expand_input1 = nn.Linear(1, 1)
+        
+        nn.init.normal_(self.expand_input1.weight, mean=0.0, std=1e-2)
+        
+        self.norm_att = nn.LayerNorm(self.C)
+        self.rms_node = nn.LayerNorm(self.C)        
+        
+        self.alpha_d = nn.Parameter(torch.ones(1))
+        
+        self.reduce_input = o3.Linear(
+            irreps_in=o3.Irreps(f"{input_size}x0e"),
+            irreps_out=o3.Irreps(f"{self.C}x0e")
+        )
+
+
+    def build_sphere_grid(self, H, W):
+        theta = torch.linspace(0, torch.pi, H)
+        phi = torch.linspace(0, 2 * torch.pi, W)
+        theta, phi = torch.meshgrid(theta, phi, indexing="ij")
+        x = torch.sin(theta) * torch.cos(phi)
+        y = torch.sin(theta) * torch.sin(phi)
+        z = torch.cos(theta)
+        return torch.stack([x, y, z], dim=-1).reshape(H*W,3)
+
+    def forward(self, node_feats_, position, edge_index, rbf=None):
+        H, W = self.H, self.W
+        HW = self.HW
+        device = node_feats_.device
+        src, tgt = edge_index
+        E = src.size(0)
+        N = node_feats_.size(0)
+
+        
+        # ----------------------------
+        # E3NN
+        # ----------------------------
+        node_feats = self.reduce_input(node_feats_)
+
+        # ----------------------------
+        # Attention
+        # ----------------------------
+        
+        grid = self.sphere_grid.to(device)
+        pos_S = position[src]
+        pos_T = position[tgt]
+        
+        edge_dist = (pos_S - pos_T).norm(dim=-1, keepdim=True)
+                
+        sphere_points = pos_S.unsqueeze(1) + edge_dist.unsqueeze(1) * grid.unsqueeze(0)
+        dist_grid = (sphere_points - pos_T.unsqueeze(1)).norm(dim=-1, keepdim=True)
+        w_ed = torch.exp(-self.alpha_d*torch.log(dist_grid+0.00001))
+        
+        
+        grid_emb = self.dir_enc(grid).unsqueeze(0).detach()
+        dist_emb = self.dist_enc(dist_grid)
+        sphere_feat = node_feats[tgt].unsqueeze(1) + dist_emb + grid_emb 
+        sphere_feat = self.norm_sphere(sphere_feat) 
+        
+
+        sphere_feat = sphere_feat.permute(0, 2, 1).reshape(E, self.C, H, W)
+        w_ed = w_ed.reshape(E, 1, H, W)
+        
+        sphere_2d = sphere_feat * w_ed
+        
+        sphere_2d = scatter_add(sphere_2d, src, dim=0)
+        tot_w = scatter_add(w_ed, src, dim=0)
+        
+        sphere_2d = sphere_2d/tot_w
+              
+        
+        attn_out = self.attn_s2(sphere_2d, sphere_2d)        
+        
+        
+        attn_out = attn_out[src]
+        
+        # ----------------------------
+        # Readout
+        # ----------------------------
+        
+        
+        attn_flat = attn_out.flatten(2).transpose(1,2) + node_feats[tgt].unsqueeze(1)    
+            
+        x_rec = attn_flat.mean(dim=1).mean(dim=1, keepdim=True)        
+        x_rec = self.expand_input1(x_rec)                    
+        gate = torch.sigmoid(x_rec)
+        
+        msg = gate * node_feats_                               
+        degree = scatter_add(torch.ones_like(tgt, device=device), tgt, dim=0, dim_size=N)
+        msg = msg / (degree[tgt].unsqueeze(-1) + 1e-6)
+
+        out = node_feats_.clone()
+        out.index_add_(0, tgt, msg)
+        out = out + node_feats_ 
+               
+          
+        return out, gate
+        
 
 class SEAttention(nn.Module):
     def __init__(self, input_size, hidden_size, H=4, W=8):
